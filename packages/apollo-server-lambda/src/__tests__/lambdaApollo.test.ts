@@ -1,17 +1,13 @@
 import { ApolloServer } from '../ApolloServer';
 import testSuite, {
   schema as Schema,
-  CreateAppOptions,
-  NODE_MAJOR_VERSION,
-  NODE_MINOR_VERSION
+  CreateAppOptions
 } from 'apollo-server-integration-testsuite';
-import { Config } from 'apollo-server-core' ;
+import { Config } from 'apollo-server-core';
 import url from 'url';
 import { IncomingMessage, ServerResponse } from 'http';
 import request = require('supertest');
-
 import gql from 'graphql-tag';
-import { argsToArgsConfig } from 'graphql/type/definition';
 
 const createLambda = (options: CreateAppOptions = {}) => {
   const server = new ApolloServer(
@@ -101,10 +97,7 @@ const resolvers = {
 
 // NODE: graphql-upload (8.0.0) requires Node 8.5 or higher
 
-const supportedNodeVersion =
-  ((NODE_MAJOR_VERSION === 8 && NODE_MINOR_VERSION >= 5) || NODE_MAJOR_VERSION >8);
-
-(supportedNodeVersion ? describe : describe.skip)('file uploads', () => {
+describe('file uploads', () => {
   let app = <any>null
   beforeAll(async ()=>{
     app = await createLambda({

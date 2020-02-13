@@ -5,9 +5,10 @@ import {
 } from 'aws-lambda';
 import {
   ApolloServerBase,
-  FileUploadOptions,
   GraphQLOptions,
-  Config
+  Config,
+  processFileUploads,
+  formatApolloErrors,
 } from 'apollo-server-core';
 import {
   renderPlaygroundPage,
@@ -16,7 +17,8 @@ import {
 
 import { graphqlLambda } from './lambdaApollo';
 import { Headers } from 'apollo-server-env';
-import stream from 'stream'
+import { Readable, Writable } from 'stream'
+import { ServerResponse } from 'http'
 
 export interface CreateHandlerOptions {
   cors?: {
@@ -27,7 +29,6 @@ export interface CreateHandlerOptions {
     credentials?: boolean;
     maxAge?: number;
   };
-  uploadsConfig?: FileUploadOptions;
   onHealthCheck?: (req: APIGatewayProxyEvent) => Promise<any>;
 }
 
@@ -45,19 +46,14 @@ export class ApolloServer extends ApolloServerBase {
     super(options);
   }
 
-  // Uploads are supported in this integration
-  protected supportsUploads(): boolean {
-    return true;
-  }
-
   // This translates the arguments from the middleware into graphQL options It
   // provides typings for the integration specific behavior, ideally this would
   // be propagated with a generic to the super class
   createGraphQLServerOptions(
     event: APIGatewayProxyEvent,
-    context: LambdaContext
+    context: LambdaContext,
   ): Promise<GraphQLOptions> {
-    return super.graphQLServerOptions({ event, context});
+    return super.graphQLServerOptions({ event, context });
   }
 
   public createHandler({ cors, onHealthCheck }: CreateHandlerOptions = { cors: undefined, onHealthCheck: undefined }) {
@@ -224,30 +220,62 @@ export class ApolloServer extends ApolloServerBase {
           });
         }
       }
+      const response = new Writable() as ServerResponse;
 
-      const makeCallbackFilter = (doneFn: Function): APIGatewayProxyCallback => {
-        return (error, result) => {
-          doneFn(); // needed to close the response
-          callback(
-            error,
-            result && {
-              ...result,
-              headers: {
-                ...result.headers,
-                ...requestCorsHeadersObject,
-              },
+      const callbackFilter: APIGatewayProxyCallback = (error, result) => {
+        response.end();
+        callback(
+          error,
+          result && {
+            ...result,
+            headers: {
+              ...result.headers,
+              ...requestCorsHeadersObject,
             },
-          );
-        };
+          },
+        );
       };
 
-      const response = new stream.Writable() as NodeJS.WritableStream;
-      // These serverParams are needed to pass to allow processing of file uploads
-      const serverParams = {
-        response,
-        uploadsConfig: this.uploadsConfig || {},
-        requestOptions: this.requestOptions
+
+      const processEvent:any = async () =>{
+        const contentType = event.headers["content-type"] || event.headers["Content-Type"];
+        if (event.httpMethod === 'POST' && event.body){
+          if (
+            contentType &&
+            contentType.startsWith("multipart/form-data") &&
+            typeof processFileUploads === "function"
+            ){
+            const request = new Readable() as any;
+
+            request.push(
+              Buffer.from(
+                <any>event.body,
+                event.isBase64Encoded ? "base64" : "ascii"
+              )
+            );
+            request.push(null);
+            request.headers = event.headers;
+            request.headers["content-type"] = contentType;
+            await processFileUploads(request, response, this.uploadsConfig)
+              .then((body: any) => {
+                event.body = body;
+              // if files were uploaded they're in the body here
+            })
+            .catch(error => {
+              throw formatApolloErrors([error], {
+                formatter: this.requestOptions.formatError,
+                debug: this.requestOptions.debug,
+              });
+            });
+
+          } else {
+            event.body = await JSON.parse(event.body)
+          }
+
+        }
+        return event;
       }
+
       graphqlLambda(async () => {
         // In a world where this `createHandler` was async, we might avoid this
         // but since we don't want to introduce a breaking change to this API
@@ -256,11 +284,10 @@ export class ApolloServer extends ApolloServerBase {
         // to `await` the `promiseWillStart` which we kicked off at the top of
         // this method to ensure that it runs to completion (which is part of
         // its contract) prior to processing the request.
+        console.log('gqlLambda func')
         await promiseWillStart;
         return this.createGraphQLServerOptions(event, context);
-      }, serverParams)(event, context, makeCallbackFilter(()=>{
-        response.end();
-      }));
+      })(processEvent, context, callbackFilter);
     };
   }
 }
